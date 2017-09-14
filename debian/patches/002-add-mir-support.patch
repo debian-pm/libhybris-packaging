@@ -1,0 +1,909 @@
+Subject: [PATCH] Add Mir support (by kdub)
+
+* plumb through a lot of the makefiles for the mir platform
+
+* egl: add a mir platform to the list of available hybris platforms
+
+* add mir platform
+
+* make sure that the current way mir works still works
+
+* some internal cleanups
+
+* rework mir platform so that there autodetection is cleaner
+
+* cleanup other platforms
+
+* put the appropriate copyright header in
+
+* cleanup compiler warnings
+
+* header location changes for actual mir 0.26.1 pkg
+---
+ hybris/configure.ac                                |  12 +
+ hybris/egl/egl.c                                   |  13 +-
+ hybris/egl/helper.cpp                              |  14 +-
+ hybris/egl/helper.h                                |   8 +-
+ hybris/egl/platforms/Makefile.am                   |   4 +
+ hybris/egl/platforms/common/eglplatformcommon.cpp  |   4 +-
+ hybris/egl/platforms/common/eglplatformcommon.h    |   2 +-
+ hybris/egl/platforms/fbdev/eglplatform_fbdev.cpp   |  17 +-
+ .../hwcomposer/eglplatform_hwcomposer.cpp          |  14 +-
+ hybris/egl/platforms/mir/Makefile.am               |  17 ++
+ hybris/egl/platforms/mir/eglplatform_mir.cpp       | 300 +++++++++++++++++++++
+ hybris/egl/platforms/null/eglplatform_null.c       |  13 +-
+ .../egl/platforms/wayland/eglplatform_wayland.cpp  |  25 +-
+ hybris/egl/ws.c                                    |  16 +-
+ hybris/egl/ws.h                                    |  34 ++-
+ 15 files changed, 422 insertions(+), 71 deletions(-)
+ create mode 100644 hybris/egl/platforms/mir/Makefile.am
+ create mode 100644 hybris/egl/platforms/mir/eglplatform_mir.cpp
+
+diff --git a/hybris/configure.ac b/hybris/configure.ac
+index 161b71fa..3685b36a 100644
+--- a/hybris/configure.ac
++++ b/hybris/configure.ac
+@@ -79,6 +79,17 @@ AC_ARG_ENABLE(wayland,
+   [wayland="no"])
+ AM_CONDITIONAL( [WANT_WAYLAND], [test x"$wayland" = x"yes"])
+ 
++AC_ARG_ENABLE(mir,
++  [  --enable-mir            Enable mir support (default=disabled)],
++  [mir=$enableval
++	PKG_CHECK_MODULES(MIR_CLIENT, mirclient,, exit)
++	MIR_PREFIX=`$PKG_CONFIG --variable=prefix mirclient`
++
++	AC_DEFINE(WANT_MIR, [], [We want Mir support])
++],
++  [mir="no"])
++AM_CONDITIONAL( [WANT_MIR], [test x"$mir" = x"yes"])
++
+ AC_ARG_ENABLE(wayland_serverside_buffers,
+   [  --enable-wayland_serverside_buffers            Enable serverside buffer allocation for wayland (default=enabled)],
+   [wayland_serverside_buffers=$enableval],
+@@ -245,6 +256,7 @@ AC_CONFIG_FILES([
+ 	egl/platforms/null/Makefile
+ 	egl/platforms/fbdev/Makefile
+ 	egl/platforms/wayland/Makefile
++	egl/platforms/mir/Makefile
+ 	egl/platforms/hwcomposer/Makefile
+ 	egl/platforms/hwcomposer/hwcomposer-egl.pc
+ 	glesv1/glesv1_cm.pc
+diff --git a/hybris/egl/egl.c b/hybris/egl/egl.c
+index f6dcd09a..751476d9 100644
+--- a/hybris/egl/egl.c
++++ b/hybris/egl/egl.c
+@@ -238,17 +238,17 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
+ 
+ 	HYBRIS_TRACE_BEGIN("hybris-egl", "eglCreateWindowSurface", "");
+ 	struct _EGLDisplay *display = hybris_egl_display_get_mapping(dpy);
+-	win = ws_CreateWindow(win, display);
++	struct _EGLNativeWindowType* window = ws_CreateWindow(win, display, config);
+ 
+-	assert(((struct ANativeWindowBuffer *) win)->common.magic == ANDROID_NATIVE_WINDOW_MAGIC);
++	assert(((struct ANativeWindowBuffer *) window->win)->common.magic == ANDROID_NATIVE_WINDOW_MAGIC);
+ 
+ 	HYBRIS_TRACE_BEGIN("native-egl", "eglCreateWindowSurface", "");
+-	EGLSurface result = (*_eglCreateWindowSurface)(dpy, config, win, attrib_list);
++	EGLSurface result = (*_eglCreateWindowSurface)(dpy, config, window->win, attrib_list);
+ 
+ 	HYBRIS_TRACE_END("native-egl", "eglCreateWindowSurface", "");
+ 
+ 	if (result != EGL_NO_SURFACE)
+-		egl_helper_push_mapping(result, win);
++		egl_helper_push_mapping(result, window);
+ 
+ 	HYBRIS_TRACE_END("hybris-egl", "eglCreateWindowSurface", "");
+ 	return result;
+@@ -334,7 +334,7 @@ HYBRIS_IMPLEMENT_FUNCTION1(egl, EGLBoolean, eglWaitNative, EGLint);
+ 
+ EGLBoolean _my_eglSwapBuffersWithDamageEXT(EGLDisplay dpy, EGLSurface surface, EGLint *rects, EGLint n_rects)
+ {
+-	EGLNativeWindowType win;
++	struct _EGLNativeWindowType* win;
+ 	EGLBoolean ret;
+ 	HYBRIS_TRACE_BEGIN("hybris-egl", "eglSwapBuffersWithDamageEXT", "");
+ 	HYBRIS_DLSYSM(egl, &_eglSwapBuffers, "eglSwapBuffers");
+@@ -371,7 +371,8 @@ static EGLImageKHR _my_eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum
+ 	EGLClientBuffer newbuffer = buffer;
+ 	const EGLint *newattrib_list = attrib_list;
+ 
+-	ws_passthroughImageKHR(&newctx, &newtarget, &newbuffer, &newattrib_list);
++	struct _EGLDisplay *display = hybris_egl_display_get_mapping(dpy);
++	ws_passthroughImageKHR(display, &newctx, &newtarget, &newbuffer, &newattrib_list);
+ 
+ 	EGLImageKHR eik = (*_eglCreateImageKHR)(dpy, newctx, newtarget, newbuffer, newattrib_list);
+ 
+diff --git a/hybris/egl/helper.cpp b/hybris/egl/helper.cpp
+index b1c84c21..1a54b902 100644
+--- a/hybris/egl/helper.cpp
++++ b/hybris/egl/helper.cpp
+@@ -25,10 +25,10 @@
+ 
+ 
+ /* Keep track of active EGL window surfaces */
+-static std::map<EGLSurface,EGLNativeWindowType> _surface_window_map;
++static std::map<EGLSurface, _EGLNativeWindowType*> _surface_window_map;
+ 
+ 
+-void egl_helper_push_mapping(EGLSurface surface, EGLNativeWindowType window)
++void egl_helper_push_mapping(EGLSurface surface, _EGLNativeWindowType* window)
+ {
+     assert(!egl_helper_has_mapping(surface));
+ 
+@@ -40,9 +40,9 @@ int egl_helper_has_mapping(EGLSurface surface)
+     return (_surface_window_map.find(surface) != _surface_window_map.end());
+ }
+ 
+-EGLNativeWindowType egl_helper_get_mapping(EGLSurface surface)
++_EGLNativeWindowType* egl_helper_get_mapping(EGLSurface surface)
+ {
+-    std::map<EGLSurface,EGLNativeWindowType>::iterator it;
++    std::map<EGLSurface,_EGLNativeWindowType*>::iterator it;
+     it = _surface_window_map.find(surface);
+ 
+     /* Caller must check with egl_helper_has_mapping() before */
+@@ -51,15 +51,15 @@ EGLNativeWindowType egl_helper_get_mapping(EGLSurface surface)
+     return it->second;
+ }
+ 
+-EGLNativeWindowType egl_helper_pop_mapping(EGLSurface surface)
++_EGLNativeWindowType* egl_helper_pop_mapping(EGLSurface surface)
+ {
+-    std::map<EGLSurface,EGLNativeWindowType>::iterator it;
++    std::map<EGLSurface,_EGLNativeWindowType*>::iterator it;
+     it = _surface_window_map.find(surface);
+ 
+     /* Caller must check with egl_helper_has_mapping() before */
+     assert(it != _surface_window_map.end());
+ 
+-    EGLNativeWindowType result = it->second;
++    _EGLNativeWindowType* result = it->second;
+     _surface_window_map.erase(it);
+     return result;
+ }
+diff --git a/hybris/egl/helper.h b/hybris/egl/helper.h
+index 1b3144b5..0866988e 100644
+--- a/hybris/egl/helper.h
++++ b/hybris/egl/helper.h
+@@ -23,7 +23,7 @@
+ 
+ 
+ #include <EGL/egl.h>
+-
++#include "ws.h"
+ 
+ #ifdef __cplusplus
+ extern "C" {
+@@ -31,16 +31,16 @@ extern "C" {
+ 
+ 
+ /* Add new mapping from surface to window */
+-void egl_helper_push_mapping(EGLSurface surface, EGLNativeWindowType window);
++void egl_helper_push_mapping(EGLSurface surface, struct _EGLNativeWindowType* window);
+ 
+ /* Check if a mapping for a surface exist */
+ int egl_helper_has_mapping(EGLSurface surface);
+ 
+ /* Return (without removing) the mapping for a surface */
+-EGLNativeWindowType egl_helper_get_mapping(EGLSurface surface);
++struct _EGLNativeWindowType* egl_helper_get_mapping(EGLSurface surface);
+ 
+ /* Return and remove the mapping for a surface */
+-EGLNativeWindowType egl_helper_pop_mapping(EGLSurface surface);
++struct _EGLNativeWindowType* egl_helper_pop_mapping(EGLSurface surface);
+ 
+ 
+ #ifdef __cplusplus
+diff --git a/hybris/egl/platforms/Makefile.am b/hybris/egl/platforms/Makefile.am
+index 4126752d..af704946 100644
+--- a/hybris/egl/platforms/Makefile.am
++++ b/hybris/egl/platforms/Makefile.am
+@@ -11,4 +11,8 @@ if WANT_WAYLAND
+ SUBDIRS += wayland
+ endif
+ 
++if WANT_MIR
++SUBDIRS += mir
++endif
++
+ 
+diff --git a/hybris/egl/platforms/common/eglplatformcommon.cpp b/hybris/egl/platforms/common/eglplatformcommon.cpp
+index b512dc08..ebcbbb80 100644
+--- a/hybris/egl/platforms/common/eglplatformcommon.cpp
++++ b/hybris/egl/platforms/common/eglplatformcommon.cpp
+@@ -43,7 +43,7 @@ extern "C" int hybris_egl_has_mapping(EGLSurface surface)
+ 	return (*my_egl_interface->has_mapping)(surface);
+ }
+ 
+-EGLNativeWindowType hybris_egl_get_mapping(EGLSurface surface)
++struct _EGLNativeWindowType* hybris_egl_get_mapping(EGLSurface surface)
+ {
+ 	return (*my_egl_interface->get_mapping)(surface);
+ }
+@@ -265,7 +265,7 @@ extern "C" EGLBoolean eglplatformcommon_eglHybrisReleaseNativeBuffer(EGLClientBu
+ 
+ 
+ extern "C" void
+-eglplatformcommon_passthroughImageKHR(EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list)
++eglplatformcommon_passthroughImageKHR(struct _EGLDisplay*, EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list)
+ {
+ #ifdef WANT_WAYLAND
+ 	static int debugenvchecked = 0;
+diff --git a/hybris/egl/platforms/common/eglplatformcommon.h b/hybris/egl/platforms/common/eglplatformcommon.h
+index aec29db2..ce519168 100644
+--- a/hybris/egl/platforms/common/eglplatformcommon.h
++++ b/hybris/egl/platforms/common/eglplatformcommon.h
+@@ -6,6 +6,6 @@
+ 
+ void eglplatformcommon_init(struct ws_egl_interface *egl_iface, gralloc_module_t *gralloc, alloc_device_t *allocdevice);
+ __eglMustCastToProperFunctionPointerType eglplatformcommon_eglGetProcAddress(const char *procname);
+-void eglplatformcommon_passthroughImageKHR(EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list);
++void eglplatformcommon_passthroughImageKHR(struct _EGLDisplay*, EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list);
+ const char *eglplatformcommon_eglQueryString(EGLDisplay dpy, EGLint name, const char *(*real_eglQueryString)(EGLDisplay dpy, EGLint name));
+ #endif
+diff --git a/hybris/egl/platforms/fbdev/eglplatform_fbdev.cpp b/hybris/egl/platforms/fbdev/eglplatform_fbdev.cpp
+index c25a2d74..834754d3 100644
+--- a/hybris/egl/platforms/fbdev/eglplatform_fbdev.cpp
++++ b/hybris/egl/platforms/fbdev/eglplatform_fbdev.cpp
+@@ -61,17 +61,19 @@ extern "C" void fbdevws_Terminate(_EGLDisplay *dpy)
+ 	delete dpy;
+ }
+ 
+-extern "C" EGLNativeWindowType fbdevws_CreateWindow(EGLNativeWindowType win, _EGLDisplay *display)
++extern "C" struct _EGLNativeWindowType *fbdevws_CreateWindow(EGLNativeWindowType win, _EGLDisplay *display, EGLConfig)
+ {
+ 	assert (gralloc != NULL);
+ 	assert (_nativewindow == NULL);
+ 
+ 	_nativewindow = new FbDevNativeWindow(alloc, framebuffer);
+ 	_nativewindow->common.incRef(&_nativewindow->common);
+-	return (EGLNativeWindowType) static_cast<struct ANativeWindow *>(_nativewindow);
++    struct _EGLNativeWindowType* type = new struct _EGLNativeWindowType;
++	type->win = (EGLNativeWindowType) static_cast<struct ANativeWindow *>(_nativewindow);
++	return type;
+ }
+ 
+-extern "C" void fbdevws_DestroyWindow(EGLNativeWindowType win)
++extern "C" void fbdevws_DestroyWindow(struct _EGLNativeWindowType *win)
+ {
+ 	assert (_nativewindow != NULL);
+ 	assert (static_cast<FbDevNativeWindow *>((struct ANativeWindow *)win) == _nativewindow);
+@@ -79,6 +81,7 @@ extern "C" void fbdevws_DestroyWindow(EGLNativeWindowType win)
+ 	_nativewindow->common.decRef(&_nativewindow->common);
+ 	/* We are done with it, refcounting will delete the window when appropriate */
+ 	_nativewindow = NULL;
++	delete win;
+ }
+ 
+ extern "C" __eglMustCastToProperFunctionPointerType fbdevws_eglGetProcAddress(const char *procname) 
+@@ -86,14 +89,14 @@ extern "C" __eglMustCastToProperFunctionPointerType fbdevws_eglGetProcAddress(co
+ 	return eglplatformcommon_eglGetProcAddress(procname);
+ }
+ 
+-extern "C" void fbdevws_passthroughImageKHR(EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list)
++extern "C" void fbdevws_passthroughImageKHR(_EGLDisplay* display, EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list)
+ {
+-	eglplatformcommon_passthroughImageKHR(ctx, target, buffer, attrib_list);
++	eglplatformcommon_passthroughImageKHR(display, ctx, target, buffer, attrib_list);
+ }
+ 
+-extern "C" void fbdevws_setSwapInterval(EGLDisplay dpy, EGLNativeWindowType win, EGLint interval)
++extern "C" void fbdevws_setSwapInterval(EGLDisplay dpy, _EGLNativeWindowType* win, EGLint interval)
+ {
+-	FbDevNativeWindow *window = static_cast<FbDevNativeWindow *>((struct ANativeWindow *)win);
++	FbDevNativeWindow *window = static_cast<FbDevNativeWindow *>((struct ANativeWindow *)win->win);
+ 	window->setSwapInterval(interval);
+ }
+ 
+diff --git a/hybris/egl/platforms/hwcomposer/eglplatform_hwcomposer.cpp b/hybris/egl/platforms/hwcomposer/eglplatform_hwcomposer.cpp
+index 65a699ea..fa23fca6 100644
+--- a/hybris/egl/platforms/hwcomposer/eglplatform_hwcomposer.cpp
++++ b/hybris/egl/platforms/hwcomposer/eglplatform_hwcomposer.cpp
+@@ -52,7 +52,7 @@ extern "C" void hwcomposerws_Terminate(_EGLDisplay *dpy)
+ 	delete dpy;
+ }
+ 
+-extern "C" EGLNativeWindowType hwcomposerws_CreateWindow(EGLNativeWindowType win, _EGLDisplay *display)
++extern "C" struct _EGLNativeWindowType *hwcomposerws_CreateWindow(EGLNativeWindowType win, _EGLDisplay *display, EGLConfig)
+ {
+ 	assert (gralloc != NULL);
+ 	assert (_nativewindow == NULL);
+@@ -61,10 +61,13 @@ extern "C" EGLNativeWindowType hwcomposerws_CreateWindow(EGLNativeWindowType win
+ 	window->setup(gralloc, alloc);
+ 	_nativewindow = window;
+ 	_nativewindow->common.incRef(&_nativewindow->common);
+-	return (EGLNativeWindowType) static_cast<struct ANativeWindow *>(_nativewindow);
++    struct _EGLNativeWindowType* type = new struct _EGLNativeWindowType;
++	type->win = (EGLNativeWindowType) static_cast<struct ANativeWindow *>(_nativewindow);
++	return type;
++
+ }
+ 
+-extern "C" void hwcomposerws_DestroyWindow(EGLNativeWindowType win)
++extern "C" void hwcomposerws_DestroyWindow(struct _EGLNativeWindowType* win)
+ {
+ 	assert (_nativewindow != NULL);
+ 	assert (static_cast<HWComposerNativeWindow *>((struct ANativeWindow *)win) == _nativewindow);
+@@ -72,6 +75,7 @@ extern "C" void hwcomposerws_DestroyWindow(EGLNativeWindowType win)
+ 	_nativewindow->common.decRef(&_nativewindow->common);
+ 	/* We are done with it, refcounting will delete the window when appropriate */
+ 	_nativewindow = NULL;
++	delete win;
+ }
+ 
+ extern "C" __eglMustCastToProperFunctionPointerType hwcomposerws_eglGetProcAddress(const char *procname) 
+@@ -79,9 +83,9 @@ extern "C" __eglMustCastToProperFunctionPointerType hwcomposerws_eglGetProcAddre
+ 	return eglplatformcommon_eglGetProcAddress(procname);
+ }
+ 
+-extern "C" void hwcomposerws_passthroughImageKHR(EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list)
++extern "C" void hwcomposerws_passthroughImageKHR(_EGLDisplay* dpy, EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list)
+ {
+-	eglplatformcommon_passthroughImageKHR(ctx, target, buffer, attrib_list);
++	eglplatformcommon_passthroughImageKHR(dpy, ctx, target, buffer, attrib_list);
+ }
+ 
+ struct ws_module ws_module_info = {
+diff --git a/hybris/egl/platforms/mir/Makefile.am b/hybris/egl/platforms/mir/Makefile.am
+new file mode 100644
+index 00000000..07324d8b
+--- /dev/null
++++ b/hybris/egl/platforms/mir/Makefile.am
+@@ -0,0 +1,17 @@
++pkglib_LTLIBRARIES = eglplatform_mir.la
++
++eglplatform_mir_la_SOURCES = eglplatform_mir.cpp
++eglplatform_mir_la_CXXFLAGS = \
++	-I$(top_srcdir)/egl \
++	-I$(top_srcdir)/include \
++	-I$(top_srcdir)/common \
++	-I$(top_srcdir)/include \
++	-I$(top_srcdir)/egl \
++	-I$(top_srcdir)/egl/platforms/common \
++	$(ANDROID_HEADERS_CFLAGS) \
++	$(MIR_CLIENT_CFLAGS)
++	
++eglplatform_mir_la_LDFLAGS = \
++	-avoid-version -module -shared -export-dynamic \
++	$(top_builddir)/egl/platforms/common/libhybris-eglplatformcommon.la \
++	$(top_builddir)/hardware/libhardware.la
+diff --git a/hybris/egl/platforms/mir/eglplatform_mir.cpp b/hybris/egl/platforms/mir/eglplatform_mir.cpp
+new file mode 100644
+index 00000000..42948924
+--- /dev/null
++++ b/hybris/egl/platforms/mir/eglplatform_mir.cpp
+@@ -0,0 +1,300 @@
++/*
++ * Copyright (C) 2017 Canonical Ltd
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ * Authored by: Kevin DuBois <kevin.dubois@canonical.com>
++ */
++
++#define ANDROID
++#include <EGL/eglplatform.h>
++#include <mir_toolkit/mir_extension_core.h>
++#include <mir_toolkit/extensions/android_egl.h>
++#include <mir_toolkit/mir_client_library.h>
++#include <mir_toolkit/rs/mir_render_surface.h>
++#include <android-config.h>
++#include <ws.h>
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
++#include <hybris/common/binding.h>
++#include <stdlib.h>
++#include "logging.h"
++
++extern "C" {
++#include <eglplatformcommon.h>
++}
++
++static gralloc_module_t *gralloc = 0;
++static alloc_device_t *alloc = 0;
++static unsigned int const usage = GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_HW_RENDER;
++
++struct MirNativeWindowBase : _EGLNativeWindowType
++{
++    virtual ~MirNativeWindowBase() {};
++    virtual void prepareSwap() = 0;
++    virtual void setSwapInterval(EGLint interval) = 0;
++protected:
++    MirNativeWindowBase() {};
++private:
++    MirNativeWindowBase(MirNativeWindowBase const&);
++    MirNativeWindowBase& operator=(MirNativeWindowBase const&);
++};
++
++struct MirBaseDisplay : _EGLDisplay
++{
++    MirBaseDisplay(EGLDisplay display)
++    {
++        dpy = display;
++    }
++
++    virtual struct _EGLNativeWindowType* create_window(
++        EGLNativeWindowType win, EGLConfig config) = 0;
++    virtual void destroy_window(ANativeWindow* window) = 0;
++    virtual void passthrough_img(EGLContext *ctx, EGLenum *target, EGLClientBuffer *b, const EGLint **attrib_list) = 0;
++
++protected:
++    MirBaseDisplay() {}
++private:
++    MirBaseDisplay(MirBaseDisplay const&);
++    MirBaseDisplay& operator=(MirBaseDisplay const&);
++};
++
++
++struct MirNativeWindowType : MirNativeWindowBase
++{
++    MirNativeWindowType(
++        MirExtensionAndroidEGLV1 const* ext,
++        MirRenderSurface* surface, EGLint format)
++    {
++        int width = -1;
++        int height = -1;
++        mir_render_surface_get_size(surface, &width, &height);
++        win = ext->create_window(surface, width, height, format, usage);
++        rs = surface;
++    }
++
++    ~MirNativeWindowType()
++    {
++        ext->destroy_window(win);
++    }
++
++    void prepareSwap()
++    {
++        int w = -1;
++        int h = -1;
++        mir_render_surface_get_size(rs, &w, &h);
++        if (w != width || h != height)
++        {
++            native_window_set_buffers_dimensions(win, w, h);
++            width = w;
++            height = h;
++        }
++    }
++
++    void setSwapInterval(EGLint interval)
++    {
++        ANativeWindow* anw = win;
++        anw->setSwapInterval(anw, interval);
++    }
++
++    MirExtensionAndroidEGLV1 const* ext;
++    MirRenderSurface * rs;
++    int width;
++    int height;
++};
++
++struct NullNativeWindowType : MirNativeWindowBase
++{
++    NullNativeWindowType(EGLNativeWindowType t)
++    {
++        win = t;
++    }
++
++    void prepareSwap()
++    {
++    }
++
++    void setSwapInterval(EGLint interval)
++    {
++    }
++};
++
++struct MirDisplay : MirBaseDisplay
++{
++    MirDisplay(MirConnection* con, MirExtensionAndroidEGLV1 const* ext) :
++        MirBaseDisplay(ext->to_display(connection)),
++        connection(con),
++        ext(ext)
++    {
++    }
++
++    struct _EGLNativeWindowType* create_window(
++        EGLNativeWindowType win, EGLConfig config)
++    {
++        EGLint format = 0;
++        eglGetConfigAttrib(dpy, config, EGL_NATIVE_VISUAL_ID, &format);
++        return new MirNativeWindowType(ext, (MirRenderSurface*) win, format);
++    }
++
++    void destroy_window(ANativeWindow* window)
++    {
++        ext->destroy_window(window);
++    }
++
++    void passthrough_img(EGLContext *ctx, EGLenum *target, EGLClientBuffer *b, const EGLint **attrib_list)
++    {
++        MirBuffer* buffer = (MirBuffer*) *b;
++        *b = create_buffer(buffer);
++        *target = EGL_NATIVE_BUFFER_ANDROID;
++    }
++
++    ANativeWindowBuffer* create_buffer(MirBuffer* buffer)
++    {
++        return ext->create_buffer(buffer);
++    }
++
++    void destroy_buffer(ANativeWindowBuffer* buffer)
++    {
++        return ext->destroy_buffer(buffer);
++    }
++
++private:
++    MirConnection* connection;
++    MirExtensionAndroidEGLV1 const* ext;
++};
++
++struct ErrorDisplay : MirBaseDisplay
++{
++    ErrorDisplay() :
++        MirBaseDisplay(EGL_NO_DISPLAY)
++    {
++    }
++
++    struct _EGLNativeWindowType* create_window(
++        EGLNativeWindowType win, EGLConfig config)
++    {
++        return NULL;
++    }
++
++    void destroy_window(ANativeWindow* window)
++    {
++    }
++
++    void passthrough_img(EGLContext *ctx, EGLenum *target, EGLClientBuffer *b, const EGLint **attrib_list)
++    {
++    }
++};
++
++static int const legacy_dpy = 12345;
++struct NullDisplay : MirBaseDisplay
++{
++    NullDisplay() :
++        MirBaseDisplay((EGLDisplay)&legacy_dpy)
++    {
++    }
++
++    struct _EGLNativeWindowType* create_window(EGLNativeWindowType win, EGLConfig config)
++    {
++        return new NullNativeWindowType(win);
++    }
++
++    void destroy_window(ANativeWindow* window)
++    {
++    }
++
++    void passthrough_img(EGLContext *ctx, EGLenum *target, EGLClientBuffer *b, const EGLint **attrib_list)
++    {
++    }
++};
++
++extern "C" void mir_init_module(struct ws_egl_interface *egl_iface)
++{
++    int err;
++    hw_get_module(GRALLOC_HARDWARE_MODULE_ID, (const hw_module_t **) &gralloc);
++    err = gralloc_open((const hw_module_t *) gralloc, &alloc);
++    TRACE("++ %lu mir: got gralloc %p err:%s", pthread_self(), gralloc, strerror(-err));
++    eglplatformcommon_init(egl_iface, gralloc, alloc);
++}
++
++extern "C" _EGLDisplay *mir_GetDisplay(EGLNativeDisplayType display)
++{
++    if (display == EGL_DEFAULT_DISPLAY)
++    {
++        TRACE("++ %lu mir: using null mir platform", pthread_self());
++        return new NullDisplay;
++    }
++
++    MirConnection* connection = static_cast<MirConnection*>(display);
++    MirExtensionAndroidEGLV1 const* ext =  mir_extension_android_egl_v1(connection);
++    if (!ext)
++    {
++        HYBRIS_ERROR("could not access android extensions from mir library");
++        return new ErrorDisplay;
++    }
++    TRACE("++ %lu mir: using mir platform", pthread_self());
++    return new MirDisplay(connection, ext);
++}
++
++extern "C" void mir_Terminate(_EGLDisplay *dpy)
++{
++    MirBaseDisplay* d = (MirBaseDisplay*) dpy;
++    delete d;
++}
++
++extern "C" struct _EGLNativeWindowType *mir_CreateWindow(EGLNativeWindowType win, _EGLDisplay *dis, EGLConfig config)
++{
++    MirBaseDisplay* d = (MirBaseDisplay*) dis;
++    return d->create_window(win, config);
++}
++
++extern "C" void mir_DestroyWindow(struct _EGLNativeWindowType * t)
++{
++    MirNativeWindowType* native_win = (MirNativeWindowType*) t;
++    delete native_win;
++}
++
++extern "C" void mir_prepareSwap(
++    EGLDisplay dpy, _EGLNativeWindowType* win, EGLint *damage_rects, EGLint damage_n_rects)
++{
++    MirNativeWindowType* type = (MirNativeWindowType*)win;
++    type->prepareSwap();
++}
++
++extern "C" void mir_setSwapInterval(
++    EGLDisplay dpy, struct _EGLNativeWindowType* win, EGLint interval)
++{
++    MirNativeWindowType* type = (MirNativeWindowType*)win;
++    type->setSwapInterval(interval);
++}
++
++extern "C" void
++mir_passthroughImageKHR(_EGLDisplay* disp, EGLContext *ctx,
++    EGLenum *target, EGLClientBuffer *b, const EGLint **attrib_list)
++{
++    MirBaseDisplay* d = (MirBaseDisplay*) disp;
++    d->passthrough_img(ctx, target, b, attrib_list);
++}
++
++struct ws_module ws_module_info = {
++    mir_init_module,
++    mir_GetDisplay,
++    mir_Terminate,
++    mir_CreateWindow,
++    mir_DestroyWindow,
++    eglplatformcommon_eglGetProcAddress,
++    mir_passthroughImageKHR,
++    eglplatformcommon_eglQueryString,
++    mir_prepareSwap,
++    NULL,
++    mir_setSwapInterval
++};
+diff --git a/hybris/egl/platforms/null/eglplatform_null.c b/hybris/egl/platforms/null/eglplatform_null.c
+index b637e3a3..c9e8ba90 100644
+--- a/hybris/egl/platforms/null/eglplatform_null.c
++++ b/hybris/egl/platforms/null/eglplatform_null.c
+@@ -37,19 +37,20 @@ static void nullws_Terminate(struct _EGLDisplay *dpy)
+ 	free(dpy);
+ }
+ 
+-static EGLNativeWindowType nullws_CreateWindow(EGLNativeWindowType win, struct _EGLDisplay *display)
++static struct _EGLNativeWindowType *nullws_CreateWindow(EGLNativeWindowType win, struct _EGLDisplay *display, EGLConfig config)
+ {
++    struct _EGLNativeWindowType* type = malloc(sizeof(struct _EGLNativeWindowType));
+ 	if (win == 0)
+-	{
+-		return android_createDisplaySurface();
+-	}
++        type->win = android_createDisplaySurface();
+ 	else
+-		return win;
++		type->win = win;
++    return type;
+ }
+ 
+-static void nullws_DestroyWindow(EGLNativeWindowType win)
++static void nullws_DestroyWindow(struct _EGLNativeWindowType *win)
+ {
+ 	// TODO: Cleanup?
++    free(win);
+ }
+ 
+ struct ws_module ws_module_info = {
+diff --git a/hybris/egl/platforms/wayland/eglplatform_wayland.cpp b/hybris/egl/platforms/wayland/eglplatform_wayland.cpp
+index eba778fa..8e49ed05 100644
+--- a/hybris/egl/platforms/wayland/eglplatform_wayland.cpp
++++ b/hybris/egl/platforms/wayland/eglplatform_wayland.cpp
+@@ -169,8 +169,9 @@ extern "C" void waylandws_Terminate(_EGLDisplay *dpy)
+ 	delete wdpy;
+ }
+ 
+-extern "C" EGLNativeWindowType waylandws_CreateWindow(EGLNativeWindowType win, _EGLDisplay *display)
++extern "C" struct _EGLNativeWindowType* waylandws_CreateWindow(EGLNativeWindowType win, _EGLDisplay *display, EGLConfig)
+ {
++    struct _EGLNativeWindowType* type = (struct _EGLNativeWindowType*) malloc(sizeof(struct _EGLNativeWindowType));
+ 	struct wl_egl_window *wl_window = (struct wl_egl_window*) win;
+ 	struct wl_display *wl_display = (struct wl_display*) display;
+ 
+@@ -192,10 +193,11 @@ extern "C" EGLNativeWindowType waylandws_CreateWindow(EGLNativeWindowType win, _
+ 
+ 	WaylandNativeWindow *window = new WaylandNativeWindow((struct wl_egl_window *) win, wdpy->wl_dpy, wdpy->wlegl, alloc, gralloc);
+ 	window->common.incRef(&window->common);
+-	return (EGLNativeWindowType) static_cast<struct ANativeWindow *>(window);
++    type->win = (EGLNativeWindowType) static_cast<struct ANativeWindow *>(window);
++    return type;
+ }
+ 
+-extern "C" void waylandws_DestroyWindow(EGLNativeWindowType win)
++extern "C" void waylandws_DestroyWindow(struct _EGLNativeWindowType* win)
+ {
+ 	WaylandNativeWindow *window = static_cast<WaylandNativeWindow *>((struct ANativeWindow *)win);
+ 	window->common.decRef(&window->common);
+@@ -243,9 +245,9 @@ extern "C" __eglMustCastToProperFunctionPointerType waylandws_eglGetProcAddress(
+ 	return eglplatformcommon_eglGetProcAddress(procname);
+ }
+ 
+-extern "C" void waylandws_passthroughImageKHR(EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list)
++extern "C" void waylandws_passthroughImageKHR(struct _EGLDisplay* dpy, EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list)
+ {
+-	eglplatformcommon_passthroughImageKHR(ctx, target, buffer, attrib_list);
++	eglplatformcommon_passthroughImageKHR(dpy, ctx, target, buffer, attrib_list);
+ }
+ 
+ extern "C" const char *waylandws_eglQueryString(EGLDisplay dpy, EGLint name, const char *(*real_eglQueryString)(EGLDisplay dpy, EGLint name))
+@@ -262,16 +264,16 @@ extern "C" const char *waylandws_eglQueryString(EGLDisplay dpy, EGLint name, con
+ 	return ret;
+ }
+ 
+-extern "C" void waylandws_prepareSwap(EGLDisplay dpy, EGLNativeWindowType win, EGLint *damage_rects, EGLint damage_n_rects)
++extern "C" void waylandws_prepareSwap(EGLDisplay dpy, _EGLNativeWindowType* win, EGLint *damage_rects, EGLint damage_n_rects)
+ {
+-	WaylandNativeWindow *window = static_cast<WaylandNativeWindow *>((struct ANativeWindow *)win);
++	WaylandNativeWindow *window = static_cast<WaylandNativeWindow *>((struct ANativeWindow *)win->win);
+ 	window->prepareSwap(damage_rects, damage_n_rects);
+ }
+ 
+-extern "C" void waylandws_finishSwap(EGLDisplay dpy, EGLNativeWindowType win)
++extern "C" void waylandws_finishSwap(EGLDisplay dpy, _EGLNativeWindowType* win)
+ {
+ 	_init_egl_funcs(dpy);
+-	WaylandNativeWindow *window = static_cast<WaylandNativeWindow *>((struct ANativeWindow *)win);
++	WaylandNativeWindow *window = static_cast<WaylandNativeWindow *>((struct ANativeWindow *)win->win);
+ 	if (_eglCreateSyncKHR) {
+ 		EGLSyncKHR sync = (*_eglCreateSyncKHR)(dpy, EGL_SYNC_FENCE_KHR, NULL);
+ 		(*_eglClientWaitSyncKHR)(dpy, sync, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGL_FOREVER_KHR);
+@@ -280,9 +282,9 @@ extern "C" void waylandws_finishSwap(EGLDisplay dpy, EGLNativeWindowType win)
+ 	window->finishSwap();
+ }
+ 
+-extern "C" void waylandws_setSwapInterval(EGLDisplay dpy, EGLNativeWindowType win, EGLint interval)
++extern "C" void waylandws_setSwapInterval(EGLDisplay dpy, _EGLNativeWindowType* win, EGLint interval)
+ {
+-	WaylandNativeWindow *window = static_cast<WaylandNativeWindow *>((struct ANativeWindow *)win);
++	WaylandNativeWindow *window = static_cast<WaylandNativeWindow *>((struct ANativeWindow *)win->win);
+ 	window->setSwapInterval(interval);
+ }
+ 
+@@ -305,4 +307,3 @@ struct ws_module ws_module_info = {
+ 
+ 
+ 
+-
+diff --git a/hybris/egl/ws.c b/hybris/egl/ws.c
+index b10c7041..272e208c 100644
+--- a/hybris/egl/ws.c
++++ b/hybris/egl/ws.c
+@@ -67,13 +67,13 @@ void ws_Terminate(struct _EGLDisplay *dpy)
+ 	ws->Terminate(dpy);
+ }
+ 
+-EGLNativeWindowType ws_CreateWindow(EGLNativeWindowType win, struct _EGLDisplay *display)
++struct _EGLNativeWindowType* ws_CreateWindow(EGLNativeWindowType win, struct _EGLDisplay *display, EGLConfig config)
+ {
+ 	_init_ws();
+-	return ws->CreateWindow(win, display);
++	return ws->CreateWindow(win, display, config);
+ }
+ 
+-void ws_DestroyWindow(EGLNativeWindowType win)
++void ws_DestroyWindow(struct _EGLNativeWindowType* win)
+ {
+ 	_init_ws();
+ 	return ws->DestroyWindow(win);
+@@ -85,10 +85,10 @@ __eglMustCastToProperFunctionPointerType ws_eglGetProcAddress(const char *procna
+ 	return ws->eglGetProcAddress(procname);
+ }
+ 
+-void ws_passthroughImageKHR(EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list)
++void ws_passthroughImageKHR(struct _EGLDisplay* dpy, EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list)
+ {
+ 	_init_ws();
+-	return ws->passthroughImageKHR(ctx, target, buffer, attrib_list);
++	return ws->passthroughImageKHR(dpy, ctx, target, buffer, attrib_list);
+ }
+ 
+ const char *ws_eglQueryString(EGLDisplay dpy, EGLint name, const char *(*real_eglQueryString)(EGLDisplay dpy, EGLint name))
+@@ -97,21 +97,21 @@ const char *ws_eglQueryString(EGLDisplay dpy, EGLint name, const char *(*real_eg
+ 	return ws->eglQueryString(dpy, name, real_eglQueryString);
+ }
+ 
+-void ws_prepareSwap(EGLDisplay dpy, EGLNativeWindowType win, EGLint *damage_rects, EGLint damage_n_rects)
++void ws_prepareSwap(EGLDisplay dpy, struct _EGLNativeWindowType* win, EGLint *damage_rects, EGLint damage_n_rects)
+ {
+ 	_init_ws();
+ 	if (ws->prepareSwap)
+ 		ws->prepareSwap(dpy, win, damage_rects, damage_n_rects);
+ }
+ 
+-void ws_finishSwap(EGLDisplay dpy, EGLNativeWindowType win)
++void ws_finishSwap(EGLDisplay dpy, struct _EGLNativeWindowType* win)
+ {
+ 	_init_ws();
+ 	if (ws->finishSwap)
+ 		ws->finishSwap(dpy, win);
+ }
+ 
+-void ws_setSwapInterval(EGLDisplay dpy, EGLNativeWindowType win, EGLint interval)
++void ws_setSwapInterval(EGLDisplay dpy, struct _EGLNativeWindowType* win, EGLint interval)
+ {
+ 	_init_ws();
+ 	if (ws->setSwapInterval)
+diff --git a/hybris/egl/ws.h b/hybris/egl/ws.h
+index c4811c00..751f3e2b 100644
+--- a/hybris/egl/ws.h
++++ b/hybris/egl/ws.h
+@@ -7,7 +7,7 @@ struct ws_egl_interface {
+ 	void * (*android_egl_dlsym)(const char *symbol);
+ 
+ 	int (*has_mapping)(EGLSurface surface);
+-	EGLNativeWindowType (*get_mapping)(EGLSurface surface);
++	struct _EGLNativeWindowType* (*get_mapping)(EGLSurface surface);
+ };
+ 
+ struct egl_image
+@@ -24,30 +24,38 @@ struct _EGLDisplay {
+ 	EGLDisplay dpy;
+ };
+ 
++struct _EGLNativeWindowType {
++	EGLNativeWindowType win;
++};
++
++struct _EGLClientBuffer {
++    EGLClientBuffer buf;
++};
++
+ struct ws_module {
+ 	void (*init_module)(struct ws_egl_interface *egl_interface);
+ 
+ 	struct _EGLDisplay *(*GetDisplay)(EGLNativeDisplayType native);
+ 	void (*Terminate)(struct _EGLDisplay *display);
+-	EGLNativeWindowType (*CreateWindow)(EGLNativeWindowType win, struct _EGLDisplay *display);
+-	void (*DestroyWindow)(EGLNativeWindowType win);
++	struct _EGLNativeWindowType *(*CreateWindow)(EGLNativeWindowType win, struct _EGLDisplay *display, EGLConfig config);
++	void (*DestroyWindow)(struct _EGLNativeWindowType* win);
+ 	__eglMustCastToProperFunctionPointerType (*eglGetProcAddress)(const char *procname);
+-	void (*passthroughImageKHR)(EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list);
++	void (*passthroughImageKHR)(struct _EGLDisplay* dpy, EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list);
+ 	const char *(*eglQueryString)(EGLDisplay dpy, EGLint name, const char *(*real_eglQueryString)(EGLDisplay dpy, EGLint name));
+-	void (*prepareSwap)(EGLDisplay dpy, EGLNativeWindowType win, EGLint *damage_rects, EGLint damage_n_rects);
+-	void (*finishSwap)(EGLDisplay dpy, EGLNativeWindowType win);
+-	void (*setSwapInterval)(EGLDisplay dpy, EGLNativeWindowType win, EGLint interval);
++	void (*prepareSwap)(EGLDisplay dpy, struct _EGLNativeWindowType* win, EGLint *damage_rects, EGLint damage_n_rects);
++	void (*finishSwap)(EGLDisplay dpy, struct _EGLNativeWindowType* win);
++	void (*setSwapInterval)(EGLDisplay dpy, struct _EGLNativeWindowType* win, EGLint interval);
+ };
+ 
+ struct _EGLDisplay *ws_GetDisplay(EGLNativeDisplayType native);
+ void ws_Terminate(struct _EGLDisplay *dpy);
+-EGLNativeWindowType ws_CreateWindow(EGLNativeWindowType win, struct _EGLDisplay *display);
+-void ws_DestroyWindow(EGLNativeWindowType win);
++struct _EGLNativeWindowType *ws_CreateWindow(EGLNativeWindowType win, struct _EGLDisplay *display, EGLConfig);
++void ws_DestroyWindow(struct _EGLNativeWindowType* win);
+ __eglMustCastToProperFunctionPointerType ws_eglGetProcAddress(const char *procname);
+-void ws_passthroughImageKHR(EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list);
++void ws_passthroughImageKHR(struct _EGLDisplay* dpy, EGLContext *ctx, EGLenum *target, EGLClientBuffer *buffer, const EGLint **attrib_list);
+ const char *ws_eglQueryString(EGLDisplay dpy, EGLint name, const char *(*real_eglQueryString)(EGLDisplay dpy, EGLint name));
+-void ws_prepareSwap(EGLDisplay dpy, EGLNativeWindowType win, EGLint *damage_rects, EGLint damage_n_rects);
+-void ws_finishSwap(EGLDisplay dpy, EGLNativeWindowType win);
+-void ws_setSwapInterval(EGLDisplay dpy, EGLNativeWindowType win, EGLint interval);
++void ws_prepareSwap(EGLDisplay dpy, struct _EGLNativeWindowType* win, EGLint *damage_rects, EGLint damage_n_rects);
++void ws_finishSwap(EGLDisplay dpy, struct _EGLNativeWindowType* win);
++void ws_setSwapInterval(EGLDisplay dpy, struct _EGLNativeWindowType* win, EGLint interval);
+ 
+ #endif
