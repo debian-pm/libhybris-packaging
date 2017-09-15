@@ -3,8 +3,8 @@ sudo: required
 
 before_install:
   - gem install package_cloud
-  - sudo echo "deb http://archive.ubuntu.com/ubuntu xenial main resticted universe multiverse >> /etc/apt/sources.list"
-  - sudo echo "deb http://archive.ubuntu.com/ubuntu xenial-updates main resticted universe multiverse >> /etc/apt/sources.list"
+  - sudo echo "deb http://archive.ubuntu.com/ubuntu xenial main resticted universe multiverse" >> /etc/apt/sources.list
+  - sudo echo "deb http://archive.ubuntu.com/ubuntu xenial-updates main resticted universe multiverse" >> /etc/apt/sources.list
   - sudo apt-get update
   - sudo apt-get install devscripts wget debhelper
 
