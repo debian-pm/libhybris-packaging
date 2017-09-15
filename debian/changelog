@@ -4,6 +4,8 @@ libhybris (0.1.0+git20171107-1) UNRELEASED; urgency=medium
   * Remove ubuntu vivid compatibility extras
   * Standards-version 4.1.1
   * enable experimental on all architectures
+  * enable mir egl
+  * Add patch to add mir support to the upstream version
 
  -- JBBgameich <jbb.mail@gmx.de>  Fri, 20 Oct 2017 15:52:58 +0200
 
