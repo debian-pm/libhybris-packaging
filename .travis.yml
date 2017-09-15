@@ -6,12 +6,12 @@ before_install:
   - sudo echo "deb http://archive.ubuntu.com/ubuntu xenial main resticted universe multiverse >> /etc/apt/sources.list"
   - sudo echo "deb http://archive.ubuntu.com/ubuntu xenial-updates main resticted universe multiverse >> /etc/apt/sources.list"
   - sudo apt-get update
-  - sudo apt-get install devscripts wget
+  - sudo apt-get install devscripts wget debhelper
 
 script:
     - wget https://github.com/libhybris/libhybris/archive/master.tar.gz -O ../libhybris_0.1.0+git`date +%Y%m%d`.orig.tar.gz
     - dch -b -v 0.1.0+git`date +%Y%m%d`-1 --distribution xenial "CI build"
-    - apt build-dep libhybris -y
+    - sudo apt-get build-dep libhybris -y
     - dpkg-buildpackage -S -d
     - dpkg-source -x ../*.dsc ../libhybris-debian-source
     - cd ../libhybris-debian-source
