@@ -9,6 +9,7 @@ before_install:
   - sudo apt-get install devscripts wget debhelper
 
 script:
+    - rm .travis.yml
     - wget https://github.com/libhybris/libhybris/archive/master.tar.gz -O ../libhybris_0.1.0+git`date +%Y%m%d`.orig.tar.gz
     - dch -b -v 0.1.0+git`date +%Y%m%d`-1 --distribution xenial "CI build"
     - sudo apt-get build-dep libhybris -y
