@@ -1,0 +1,17 @@
+dist: trusty
+sudo: required
+
+before_install:
+  - gem install package_cloud
+  - sudo apt install devtools dch wget
+
+script:
+    - wget https://github.com/libhybris/libhybris/archive/master.tar.gz -O ../libhybris_0.1.0+git`date +%Y%m%d`.orig.tar.gz
+    - dch -b -v 0.1.0+git`date +%Y%m%d`-1 --distribution xenial "CI build"
+    - apt build-dep libhybris -y
+    - dpkg-buildpackage -S -d
+    - dpkg-source -x ../*.dsc ../libhybris-debian-source
+    - cd ../libhybris-debian-source
+    - dpkg-buildpackage
+    - package_cloud push JBBgameich/ubports/ubuntu/xenial ../*.deb
+    - package_cloud push JBBgameich/ubports/ubuntu/xenial ../*.dsc
