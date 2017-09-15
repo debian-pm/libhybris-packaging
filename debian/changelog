@@ -1,3 +1,11 @@
+libhybris (0.1.0+git20170915-1) xenial; urgency=medium
+
+  * enable mir egl
+  * Add patch to add mir support to the upstream version
+  * New snapshot from upstream
+
+ -- JBBgameich <jbb.mail@gmx.de>  Fri, 15 Sep 2017 19:24:04 +0200
+
 libhybris (0.1.0+git20151016+6d424c9-0ubuntu23) yakkety; urgency=medium
 
   [ You-Sheng Yang ]
